@@ -7,117 +7,119 @@ from collections import defaultdict
 import pandas as pd
 
 # ------------------------------
-# Menu de Navegação
+# Configurações Iniciais
 # ------------------------------
 st.set_page_config(page_title="Sistema de Monitoramento", layout="wide")
-menu = st.sidebar.radio("Navegação", ["🏠 HOME", "ℹ️ SOBRE"])
 
 # ------------------------------
-# Página HOME
+# Funções utilitárias
 # ------------------------------
+@st.cache_resource
+def carregar_modelo():
+    return YOLO("yolov8n.pt")
+
+def processar_video(video_path, classes_selecionadas):
+    model = carregar_modelo()
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+    output_path = os.path.join(tempfile.gettempdir(), "output_detectado.mp4")
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    detections_por_classe = defaultdict(list)
+    frame_count = 0
+    progress = st.progress(0, text="🔎 Processando vídeo...")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        timestamp = frame_count / fps
+        results = model(frame, verbose=False)[0]
+
+        for box in results.boxes:
+            cls_id = int(box.cls[0])
+            cls_name = model.names[cls_id]
+            if cls_name in classes_selecionadas:
+                detections_por_classe[cls_name].append(timestamp)
+
+        frame_com_box = results.plot()
+        out.write(frame_com_box)
+        frame_count += 1
+        progress.progress(min(frame_count / total_frames, 1.0))
+
+    cap.release()
+    out.release()
+    progress.empty()
+
+    return output_path, detections_por_classe
+
+# ------------------------------
+# Interface Principal
+# ------------------------------
+menu = st.sidebar.radio("Navegação", ["🏠 HOME", "ℹ️ SOBRE"])
+
 if menu == "🏠 HOME":
     st.title("📹 Sistema de Monitoramento com Visão Computacional")
     st.markdown("Envie um vídeo MP4 para detectar pessoas, cavalos e outros animais em tempo real utilizando o modelo YOLOv8n.")
 
-    # Upload do vídeo
     uploaded_file = st.file_uploader("Selecione um vídeo .mp4", type=["mp4"])
 
     if uploaded_file:
-        # Salvar vídeo temporariamente
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(uploaded_file.read())
             video_path = tmp.name
 
-        # Exibir o vídeo original enviado pelo usuário
         st.subheader("🎞️ Vídeo Original")
         st.video(video_path)
 
-        # Carregar o modelo YOLOv8n pré-treinado
-        model = YOLO("yolov8n.pt")
+        model = carregar_modelo()
+        classes_disponiveis = list(model.names.values())
+        classes_selecionadas = st.multiselect("Filtrar por classes", classes_disponiveis, default=classes_disponiveis)
 
-        # Abrir o vídeo com OpenCV
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        if st.button("🔍 Iniciar Detecção"):
+            output_path, detections_por_classe = processar_video(video_path, classes_selecionadas)
 
-        # Definir caminho de saída para o vídeo processado
-        output_path = os.path.join(tempfile.gettempdir(), "output_detectado.mp4")
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            st.subheader("🧠 Vídeo com Detecções")
+            st.video(output_path)
 
-        # Dicionário para armazenar as detecções por classe e tempo
-        detections_por_classe = defaultdict(list)
-        frame_count = 0
+            st.subheader("📊 Gráfico de Detecções por Classe")
+            contagens = {classe: len(tempos) for classe, tempos in detections_por_classe.items()}
+            chart_data = pd.DataFrame.from_dict(contagens, orient="index", columns=["Detecções"])
+            chart_data = chart_data.sort_values("Detecções", ascending=False)
+            st.bar_chart(chart_data)
 
-        # Informar ao usuário que o vídeo está sendo processado
-        st.info("🔎 Processando vídeo, aguarde...")
+            st.subheader("📋 Relatório de Detecções por Intervalo de Tempo")
+            relatorio = []
+            for classe, tempos in detections_por_classe.items():
+                if tempos:
+                    tempos.sort()
+                    relatorio.append({
+                        "Classe": classe,
+                        "Início (s)": round(min(tempos), 2),
+                        "Fim (s)": round(max(tempos), 2),
+                        "Total de Detecções": len(tempos)
+                    })
 
-        # Loop por todos os frames do vídeo
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+            df_relatorio = pd.DataFrame(relatorio).sort_values("Total de Detecções", ascending=False)
+            st.dataframe(df_relatorio)
 
-            # Calcular timestamp do frame atual
-            timestamp = frame_count / fps
+            csv = df_relatorio.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Baixar Relatório CSV", csv, "relatorio.csv", "text/csv")
 
-            # Executar detecção com YOLO
-            results = model(frame, verbose=False)[0]
-
-            # Registrar detecções por classe
-            for box in results.boxes:
-                cls_id = int(box.cls[0])
-                cls_name = model.names[cls_id]
-                detections_por_classe[cls_name].append(timestamp)
-
-            # Desenhar bounding boxes nos frames
-            frame_com_box = results.plot()
-            out.write(frame_com_box)
-
-            frame_count += 1
-
-        # Finalizar os objetos de vídeo
-        cap.release()
-        out.release()
-
-        # Exibir vídeo com detecções
-        st.subheader("🧠 Vídeo com Detecções")
-        st.video(output_path)
-
-        # Gráfico de barras com contagem de detecções por classe
-        st.subheader("📊 Gráfico de Detecções por Classe")
-        contagens = {classe: len(tempos) for classe, tempos in detections_por_classe.items()}
-        chart_data = pd.DataFrame.from_dict(contagens, orient="index", columns=["Detecções"])
-        chart_data = chart_data.sort_values("Detecções", ascending=False)
-        st.bar_chart(chart_data)
-
-        # Gerar relatório com intervalo de tempo por classe
-        st.subheader("📋 Relatório de Detecções por Intervalo de Tempo")
-        relatorio = []
-        for classe, tempos in detections_por_classe.items():
-            if tempos:
-                tempos.sort()
-                relatorio.append({
-                    "Classe": classe,
-                    "Início (s)": round(min(tempos), 2),
-                    "Fim (s)": round(max(tempos), 2),
-                    "Total de Detecções": len(tempos)
-                })
-
-        df_relatorio = pd.DataFrame(relatorio).sort_values("Total de Detecções", ascending=False)
-        st.dataframe(df_relatorio)
-
-        # Botão para download do vídeo com as detecções
-        with open(output_path, "rb") as f:
-            st.download_button("📥 Baixar vídeo com detecções", f, "video_detectado.mp4", mime="video/mp4")
+            with open(output_path, "rb") as f:
+                st.download_button("📥 Baixar vídeo com detecções", f, "video_detectado.mp4", mime="video/mp4")
 
 # ------------------------------
 # Página SOBRE
 # ------------------------------
 elif menu == "ℹ️ SOBRE":
     st.title("ℹ️ Sobre o Projeto")
-
     st.markdown("""
     Em um mercado cada vez mais competitivo, a reputação de um negócio pode ser impactada por detalhes que muitas vezes passam despercebidos. Pensando nisso, nosso projeto de **Bounding Box com detecção de movimento** oferece uma solução inovadora e inteligente para estabelecimentos como restaurantes, lojas, supermercados e outros ambientes comerciais.
 
